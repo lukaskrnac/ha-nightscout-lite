@@ -32,8 +32,10 @@ LLU_ARROWS = {1: "SingleDown", 2: "FortyFiveDown", 3: "Flat", 4: "FortyFiveUp", 
 # Words integrations use for trends, matched as whole phrases on lowercased text, most
 # specific first.
 TREND_WORDS = (
-    (("rising quickly", "rising fast", "rapidly rising", "increasing quickly"), "SingleUp"),
-    (("falling quickly", "falling fast", "rapidly falling", "decreasing quickly"), "SingleDown"),
+    (("rising quickly", "rising fast", "rising rapidly", "rapidly rising", "increasing quickly",
+      "increasing fast", "increasing rapidly", "rapidly increasing"), "SingleUp"),
+    (("falling quickly", "falling fast", "falling rapidly", "rapidly falling", "decreasing quickly",
+      "decreasing fast", "decreasing rapidly", "rapidly decreasing"), "SingleDown"),
     (("rising slowly", "slowly rising"), "FortyFiveUp"),
     (("falling slowly", "slowly falling"), "FortyFiveDown"),
     (("rising", "increasing", "up"), "FortyFiveUp"),

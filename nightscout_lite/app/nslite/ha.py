@@ -42,6 +42,9 @@ TIMESTAMP_ATTRIBUTE_CANDIDATES = (
     "time",
 )
 TREND_ATTRIBUTE_CANDIDATES = ("trend", "trend_arrow", "TrendArrow", "trendArrow", "direction")
+# Integrations that show mmol/L often keep the sensor's own mg/dL value beside it. That one is
+# exact; converting the rounded mmol/L back can land a unit off.
+MGDL_ATTRIBUTE_CANDIDATES = ("value_mg_dl", "value_mgdl", "mg_dl", "mgdl", "ValueInMgPerDl", "sgv")
 
 # A reading older than this is history, not news: it goes to the store but not to the entity,
 # whose recorder would file it under the time it arrived.
@@ -144,6 +147,12 @@ def states_to_entries(states: list[dict], config: SourceConfig, trend_states: li
         mgdl = to_mgdl(state.get("state"), attributes.get("unit_of_measurement"))
         if mgdl is None:
             continue
+        for name in MGDL_ATTRIBUTE_CANDIDATES:
+            exact = to_mgdl(attributes.get(name), "mg/dL")
+            # Only when it agrees with the state, so a stale attribute cannot replace a value.
+            if exact is not None and abs(exact - mgdl) <= 3:
+                mgdl = exact
+                break
         date_ms = measurement_time(state, config)
         if date_ms is None:
             continue

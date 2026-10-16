@@ -195,6 +195,19 @@ class HomeAssistantTests(unittest.TestCase):
         self.assertEqual(docs[-1]["date"], NOW_MS)
         self.assertEqual(docs[-1]["direction"], "FortyFiveUp")
 
+    def test_libreview_integration_state(self):
+        # The exact attributes of the LibreView integration this add-on is used with.
+        state = ha_state(6.8, "2026-10-16T11:23:01+00:00", unit="mmol/L", state_class="measurement",
+                         value_mmol_l=6.8, value_mg_dl=122, trend="decreasing", app_unit_of_measurement="mmol/L",
+                         measurement_timestamp="2026-10-16T11:22:10+00:00")
+        doc = states_to_entries([state], SourceConfig("sensor.tomas_krnac_glucose_level"))[0]
+        self.assertEqual((doc["sgv"], doc["direction"]), (122, "FortyFiveDown"))
+        self.assertEqual(doc["dateString"], "2026-10-16T11:22:10.000Z")
+        self.assertEqual(util.map_direction("decreasing_fast"), "SingleDown")
+        self.assertEqual(util.map_direction("increasing_fast"), "SingleUp")
+        stale = ha_state(9.0, "2026-10-16T11:23:01+00:00", unit="mmol/L", value_mg_dl=122)
+        self.assertEqual(states_to_entries([stale], SourceConfig("x"))[0]["sgv"], 162)
+
     def test_importer_moves_cursor_and_notifies(self):
         store = temp_store()
         core = FakeCore({"sensor.libreview_glucose": [

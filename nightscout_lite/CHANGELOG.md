@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Imported readings use the integration's exact mg/dL attribute (`value_mg_dl`) when it
+  agrees with the state, instead of converting the rounded mmol/L back.
+- "decreasing_fast" / "increasing_fast" and similar map to SingleDown / SingleUp.
+
 ## 0.2.0 (renamed)
 
 - Renamed from Nightscout Bridge to Nightscout Lite (slug `nightscout_lite`), repository
