@@ -249,6 +249,46 @@ class HomeAssistantTests(unittest.TestCase):
         self.assertEqual((state, attributes["delta"], attributes["unit_of_measurement"]), ("120", 5, "mg/dL"))
 
 
+class SupervisorEnvironmentTests(unittest.TestCase):
+    def test_token_from_s6_files_when_environment_is_cleaned(self):
+        from nslite import ha
+
+        directory = tempfile.mkdtemp()
+        with open(os.path.join(directory, "SUPERVISOR_TOKEN"), "w") as handle:
+            handle.write("from-s6\n")
+        saved_dirs, saved_env = ha.S6_ENV_DIRS, os.environ.pop("SUPERVISOR_TOKEN", None)
+        try:
+            ha.S6_ENV_DIRS = ("/nonexistent", directory)
+            self.assertEqual(ha.container_env("SUPERVISOR_TOKEN"), "from-s6")
+            self.assertEqual(ha.CoreApi().token, "from-s6")
+            os.environ["SUPERVISOR_TOKEN"] = "from-env"
+            self.assertEqual(ha.container_env("SUPERVISOR_TOKEN"), "from-env")
+            self.assertEqual(ha.container_env("NOT_SET_ANYWHERE"), "")
+        finally:
+            ha.S6_ENV_DIRS = saved_dirs
+            os.environ.pop("SUPERVISOR_TOKEN", None)
+            if saved_env is not None:
+                os.environ["SUPERVISOR_TOKEN"] = saved_env
+
+    def test_disconnect_is_not_logged_as_error(self):
+        import socket
+        from nslite.server import QuietServer, make_handler, NightscoutApi
+
+        store = temp_store()
+        server = QuietServer(("127.0.0.1", 0), make_handler(NightscoutApi(store, READ_SECRET, ""), writable=False))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with self.assertNoLogs("nightscout_lite", level="ERROR"):
+                # Connect and hang up hard, like the Supervisor's port check.
+                sock = socket.create_connection(("127.0.0.1", server.server_port))
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                sock.close()
+                time.sleep(0.3)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 # --------------------------------------------------------------------------- end to end
 
 

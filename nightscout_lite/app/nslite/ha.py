@@ -60,10 +60,35 @@ class SourceConfig:
     trend_entity_id: str = ""
 
 
+S6_ENV_DIRS = ("/run/s6/container_environment", "/var/run/s6/container_environment")
+
+
+def container_env(name: str) -> str:
+    """A variable the Supervisor gave the container.
+
+    The add-on base image starts the program through s6-overlay, which hands it a cleaned
+    environment; the container's own variables, SUPERVISOR_TOKEN among them, are kept as files
+    under container_environment. The process environment is checked first for tests and for
+    runs outside s6.
+    """
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    for directory in S6_ENV_DIRS:
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                value = handle.read().strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
+
+
 class CoreApi:
     def __init__(self, base_url: str | None = None, token: str | None = None):
-        self.base_url = (base_url or os.environ.get("HA_API_URL") or "http://supervisor/core/api").rstrip("/")
-        self.token = token if token is not None else os.environ.get("SUPERVISOR_TOKEN", "")
+        self.base_url = (base_url or container_env("HA_API_URL") or "http://supervisor/core/api").rstrip("/")
+        self.token = token if token is not None else container_env("SUPERVISOR_TOKEN")
 
     def _request(self, method: str, path: str, body: Any = None) -> Any:
         data = json.dumps(body).encode("utf-8") if body is not None else None

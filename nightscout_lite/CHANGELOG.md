@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Fix: the Supervisor token was not found under s6-overlay, so importing from the source
+  sensor and publishing the entity were off. It is now read from the container environment
+  (and the program starts through `with-contenv` when the image has it).
+- A client disconnecting mid-request (the Supervisor's port check) no longer logs a traceback.
+
 ## 0.2.1
 
 - Imported readings use the integration's exact mg/dL attribute (`value_mg_dl`) when it

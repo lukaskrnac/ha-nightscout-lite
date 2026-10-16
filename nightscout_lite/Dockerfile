@@ -6,4 +6,6 @@ RUN apk add --no-cache python3
 COPY app /app
 
 WORKDIR /app
-CMD ["python3", "-u", "/app/main.py"]
+RUN chmod +x /app/run.sh
+
+CMD ["/app/run.sh"]

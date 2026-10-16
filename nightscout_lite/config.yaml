@@ -1,5 +1,5 @@
 name: Nightscout Lite
-version: "0.2.1"
+version: "0.2.2"
 slug: nightscout_lite
 description: Minimal Nightscout-compatible server inside Home Assistant
 url: https://github.com/lukaskrnac/ha-nightscout-lite

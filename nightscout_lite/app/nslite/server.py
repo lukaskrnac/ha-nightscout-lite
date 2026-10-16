@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .api import MAX_BODY_BYTES, NightscoutApi
-from .ha import CoreApi, Importer, Publisher, SourceConfig
+from .ha import CoreApi, Importer, Publisher, SourceConfig, container_env
 from .store import Store
 
 LOG = logging.getLogger("nightscout_lite")
@@ -147,6 +147,21 @@ def make_handler(api: NightscoutApi, writable: bool):
     return Handler
 
 
+class QuietServer(ThreadingHTTPServer):
+    """A client hanging up mid-request (the Supervisor's port check does) is not an error."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        import sys
+
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)):
+            LOG.debug("Client %s disconnected: %s", client_address[0], error)
+            return
+        LOG.exception("Unhandled error serving %s", client_address[0])
+
+
 class App:
     def __init__(self, options: Options, store: Store, core: CoreApi | None):
         self.options = options
@@ -181,12 +196,12 @@ class App:
             display_units=options.display_units,
             on_write=notify,
         )
-        self.servers: list[ThreadingHTTPServer] = []
+        self.servers: list[QuietServer] = []
 
     def start(self, host: str = "0.0.0.0", read_port: int = READ_PORT, write_port: int = WRITE_PORT) -> None:
-        self.servers.append(ThreadingHTTPServer((host, read_port), make_handler(self.api, writable=False)))
+        self.servers.append(QuietServer((host, read_port), make_handler(self.api, writable=False)))
         if self.options.write_secret:
-            self.servers.append(ThreadingHTTPServer((host, write_port), make_handler(self.api, writable=True)))
+            self.servers.append(QuietServer((host, write_port), make_handler(self.api, writable=True)))
         for server in self.servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         if self.importer:
@@ -217,7 +232,9 @@ def main() -> None:
     )
     options = load_options(os.environ.get("OPTIONS_PATH", "/data/options.json"))
     store = Store(os.environ.get("DB_PATH", "/data/nightscout.sqlite3"))
-    core = CoreApi() if os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HA_API_URL") else None
+    core = CoreApi() if container_env("SUPERVISOR_TOKEN") or container_env("HA_API_URL") else None
+    if core is None:
+        LOG.warning("No Supervisor token found: importing and publishing to Home Assistant are off")
     app = App(options, store, core)
     app.start()
     LOG.info(
