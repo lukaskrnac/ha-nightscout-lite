@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- Fix: the import asked Home Assistant for history without an end time, which Home Assistant
+  answers with one day only, so the first import stopped after its first day. History is now
+  read in half-day windows up to now.
+- Fix: import progress was remembered as the newest measurement time found. A sensor showing a
+  stale reading (measured days earlier) pulled every later import back to the same window, and
+  no new readings arrived. Progress is now the end of the last window read.
+
 ## 0.2.2
 
 - Fix: the Supervisor token was not found under s6-overlay, so importing from the source

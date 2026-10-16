@@ -102,11 +102,14 @@ class CoreApi:
             raw = response.read()
         return json.loads(raw.decode("utf-8")) if raw else None
 
-    def history(self, start_ms: int, entity_ids: list[str]) -> dict[str, list[dict]]:
+    def history(self, start_ms: int, entity_ids: list[str], end_ms: int) -> dict[str, list[dict]]:
         start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat()
+        end = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat()
         query = urllib.parse.urlencode(
             {
                 "filter_entity_id": ",".join(entity_ids),
+                # Without an end, Home Assistant answers one day from the start, not up to now.
+                "end_time": end,
                 # Attribute-only updates (a new measurement time, same value) are not
                 # "significant" to the recorder, but they are readings to a follower.
                 "significant_changes_only": "0",
@@ -198,9 +201,16 @@ def states_to_entries(states: list[dict], config: SourceConfig, trend_states: li
 
 
 class Importer:
-    """Copies the source sensor's history into the store, once a minute."""
+    """Copies the source sensor's history into the store, once a minute.
 
-    CURSOR_KEY = "ha_import_cursor"
+    Progress is remembered as the end of the last window read from Home Assistant, not as the
+    newest measurement time found in it: a sensor showing a stale reading (whose measurement
+    time is days old) would otherwise pull the next read back to the same window forever.
+    """
+
+    CURSOR_KEY = "ha_import_until"
+    WINDOW_MS = 12 * 60 * MINUTE_MS  # one request per half day, well inside what HA answers
+    OVERLAP_MS = 5 * MINUTE_MS  # a state can be recorded a moment after the read before it
 
     def __init__(self, api: CoreApi, store: Store, config: SourceConfig, lookback_days: int,
                  on_new: Callable[[], None] = lambda: None, clock=now_ms):
@@ -215,25 +225,27 @@ class Importer:
         now = self.clock()
         oldest = now - self.lookback_days * 24 * 60 * MINUTE_MS
         cursor = int(self.store.get_meta(self.CURSOR_KEY, "0") or 0)
-        # A little overlap: a state can be recorded a moment after the one before it was read.
-        start = max(oldest, cursor - 5 * MINUTE_MS) if cursor else oldest
+        start = max(oldest, cursor - self.OVERLAP_MS) if cursor else oldest
         entity_ids = [self.config.entity_id]
         if self.config.trend_entity_id:
             entity_ids.append(self.config.trend_entity_id)
-        grouped = self.api.history(start, entity_ids)
-        docs = states_to_entries(
-            grouped.get(self.config.entity_id, []),
-            self.config,
-            grouped.get(self.config.trend_entity_id) if self.config.trend_entity_id else None,
-        )
         inserted = 0
-        for doc in docs:
-            try:
-                inserted += self.store.insert_entries([doc], SOURCE_HA).inserted
-            except ValidationError as error:
-                LOG.debug("Skipped a source reading: %s", error)
-        if docs:
-            self.store.set_meta(self.CURSOR_KEY, str(max(doc["date"] for doc in docs)))
+        while start < now:
+            end = min(start + self.WINDOW_MS, now)
+            grouped = self.api.history(start, entity_ids, end)
+            docs = states_to_entries(
+                grouped.get(self.config.entity_id, []),
+                self.config,
+                grouped.get(self.config.trend_entity_id) if self.config.trend_entity_id else None,
+            )
+            for doc in docs:
+                try:
+                    inserted += self.store.insert_entries([doc], SOURCE_HA).inserted
+                except ValidationError as error:
+                    LOG.debug("Skipped a source reading: %s", error)
+            # Saved per window, so an interrupted first import resumes where it stopped.
+            self.store.set_meta(self.CURSOR_KEY, str(end))
+            start = end
         if inserted:
             self.on_new()
         return inserted

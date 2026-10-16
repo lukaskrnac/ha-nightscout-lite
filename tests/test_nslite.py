@@ -168,14 +168,19 @@ class StoreTests(unittest.TestCase):
 
 
 class FakeCore:
+    """Answers history like Home Assistant: only the states inside the requested window."""
+
     def __init__(self, history=None):
         self.history_payload = history or {}
         self.history_calls = []
         self.states = []
 
-    def history(self, start_ms, entity_ids):
-        self.history_calls.append((start_ms, entity_ids))
-        return self.history_payload
+    def history(self, start_ms, entity_ids, end_ms):
+        self.history_calls.append((start_ms, entity_ids, end_ms))
+        return {
+            entity: [s for s in states if start_ms <= util.parse_time_ms(s["last_updated"]) < end_ms]
+            for entity, states in self.history_payload.items()
+        }
 
     def set_state(self, entity_id, state, attributes):
         self.states.append((entity_id, state, attributes))
@@ -216,12 +221,32 @@ class HomeAssistantTests(unittest.TestCase):
         notified = []
         importer = Importer(core, store, SourceConfig("sensor.libreview_glucose"), 10,
                             on_new=lambda: notified.append(1), clock=lambda: NOW_MS)
-        self.assertEqual(importer.run_once(), 22)
+        self.assertEqual(importer.run_once(), 21)  # 08:00..08:20; 08:21 is "now", not yet recorded
+        first_import = list(core.history_calls)
+        # Ten days read in half-day windows that join up exactly and end at now.
+        self.assertEqual(len(first_import), 20)
+        self.assertEqual(first_import[0][0], NOW_MS - 10 * 24 * 60 * MIN)
+        self.assertEqual(first_import[-1][2], NOW_MS)
+        self.assertTrue(all(a[2] == b[0] for a, b in zip(first_import, first_import[1:])))
         self.assertEqual(importer.run_once(), 0)
+        self.assertEqual(core.history_calls[-1][0], NOW_MS - 5 * MIN)
         self.assertEqual(len(notified), 1)
-        first_start, second_start = core.history_calls[0][0], core.history_calls[1][0]
-        self.assertEqual(first_start, NOW_MS - 10 * 24 * 60 * MIN)
-        self.assertEqual(second_start, NOW_MS - 5 * MIN)
+
+    def test_stale_measurement_does_not_freeze_the_import(self):
+        # A sensor stuck on a reading measured a month ago, then fresh readings today.
+        store = temp_store()
+        clock = [NOW_MS - 30 * MIN]
+        stale = [ha_state(123, f"2026-10-16T07:{m:02d}:00Z", measurement_timestamp="2026-09-14T18:03:20Z")
+                 for m in range(40, 50)]
+        fresh = [ha_state(130 + m, f"2026-10-16T07:{m:02d}:00Z", measurement_timestamp=f"2026-10-16T07:{m:02d}:00Z")
+                 for m in range(51, 60)]
+        core = FakeCore({"sensor.libreview_glucose": stale})
+        importer = Importer(core, store, SourceConfig("sensor.libreview_glucose"), 10, clock=lambda: clock[0])
+        self.assertEqual(importer.run_once(), 1)
+        core.history_payload = {"sensor.libreview_glucose": stale + fresh}
+        clock[0] = NOW_MS
+        self.assertEqual(importer.run_once(), 9)
+        self.assertEqual(store.latest_entry()["dateString"], "2026-10-16T07:59:00.000Z")
 
     def test_publisher_only_sends_news(self):
         store = temp_store()
