@@ -1,0 +1,42 @@
+name: Nightscout Lite
+version: "0.2.0"
+slug: nightscout_lite
+description: Minimal Nightscout-compatible server inside Home Assistant
+url: https://github.com/lukaskrnac/ha-nightscout-lite
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+startup: application
+boot: auto
+homeassistant_api: true
+backup: hot
+ports:
+  1337/tcp: 1337
+  1338/tcp: 1338
+ports_description:
+  1337/tcp: Nightscout API, read-only (safe to publish)
+  1338/tcp: Nightscout API, read and write (keep private)
+options:
+  api_secret: ""
+  write_secret: ""
+  source_entity_id: ""
+  timestamp_attribute: ""
+  trend_attribute: ""
+  trend_entity_id: ""
+  import_days: 10
+  publish_entity_id: sensor.nightscout_glucose
+  display_units: mg/dl
+  keep_days: 0
+schema:
+  api_secret: password
+  write_secret: password?
+  source_entity_id: str?
+  timestamp_attribute: str?
+  trend_attribute: str?
+  trend_entity_id: str?
+  import_days: int(1,30)
+  publish_entity_id: str?
+  display_units: list(mg/dl|mmol)
+  keep_days: int(0,3650)

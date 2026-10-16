@@ -1,0 +1,34 @@
+configuration:
+  api_secret:
+    name: Read secret
+    description: At least 12 characters. For followers on port 1337 (read-only). This is the one you share.
+  write_secret:
+    name: Write secret
+    description: At least 12 characters and different from the read secret. For uploaders on port 1338. Empty turns writes off.
+  source_entity_id:
+    name: Source sensor
+    description: Optional existing glucose sensor to import, e.g. from the LibreView integration. Empty if all readings are uploaded.
+  timestamp_attribute:
+    name: Measurement time attribute
+    description: Attribute of the source sensor holding when the value was measured. Empty tries the usual names.
+  trend_attribute:
+    name: Trend attribute
+    description: Attribute of the source sensor holding the trend. Empty tries the usual names.
+  trend_entity_id:
+    name: Trend sensor
+    description: Separate trend entity, if the source integration has one instead of an attribute.
+  import_days:
+    name: Import days
+    description: How far back to import the source sensor's history on first start.
+  publish_entity_id:
+    name: Published entity
+    description: Entity kept at the newest reading, whatever its source, so Home Assistant records the history. Empty turns it off.
+  display_units:
+    name: Display units
+    description: Units of the published entity and of status. Entries are always mg/dL, as in Nightscout.
+  keep_days:
+    name: Keep days
+    description: Delete readings older than this. 0 keeps everything.
+network:
+  1337/tcp: Nightscout API, read-only (safe to publish)
+  1338/tcp: Nightscout API, read and write (keep private)
