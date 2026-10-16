@@ -37,6 +37,17 @@ is refused whole, with the reason in the answer.
 
 The database is `/data/nightscout.sqlite3` and is part of the add-on's backups.
 
+## How readings get from the source sensor here
+
+The add-on keeps one idle websocket to Home Assistant, subscribed to state changes of the
+source sensor only. When the sensor changes, Home Assistant sends that one state and the
+add-on stores it about a second later; followers see it on their next poll.
+
+As a safety net it also reads the sensor's history from Home Assistant's database every 5
+minutes, which fills anything missed while the add-on or the websocket was down. If the
+websocket cannot be kept up, that history read runs every minute instead. On first start it
+imports `import_days` of history, half a day per request.
+
 ## The Home Assistant entity
 
 `sensor.nightscout_glucose` gets each new reading within seconds, with `measured_at`,

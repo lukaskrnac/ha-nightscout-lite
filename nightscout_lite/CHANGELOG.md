@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Readings from the source sensor are pushed: the add-on keeps one idle websocket to Home
+  Assistant, subscribed to that sensor only, and stores each change about a second after
+  Home Assistant has it (was: up to a minute).
+- With the subscription up, the history read becomes a safety net every 5 minutes instead of
+  every minute, so Home Assistant does less work than before. If the websocket drops, reading
+  history every minute resumes until it reconnects.
+
 ## 0.2.3
 
 - Fix: the import asked Home Assistant for history without an end time, which Home Assistant

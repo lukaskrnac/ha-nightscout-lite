@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import threading
 import urllib.parse
 import urllib.request
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .store import Store, ValidationError
+from .ws import WebSocket
 from .util import DIRECTION_ARROWS, MGDL_PER_MMOL, MINUTE_MS, iso_utc, map_direction, now_ms, parse_time_ms, to_mgdl
 
 LOG = logging.getLogger("nightscout_lite.ha")
@@ -220,6 +222,23 @@ class Importer:
         self.lookback_days = lookback_days
         self.on_new = on_new
         self.clock = clock
+        self.wake = threading.Event()
+        # Once a minute on its own; the watcher stretches this while push updates arrive.
+        self.poll_seconds = 60
+
+    def ingest_state(self, state: dict) -> int:
+        """One state pushed by Home Assistant, stored at once without a history read."""
+        if state.get("entity_id") != self.config.entity_id:
+            return 0
+        inserted = 0
+        for doc in states_to_entries([state], self.config):
+            try:
+                inserted += self.store.insert_entries([doc], SOURCE_HA).inserted
+            except ValidationError as error:
+                LOG.debug("Skipped a pushed reading: %s", error)
+        if inserted:
+            self.on_new()
+        return inserted
 
     def run_once(self) -> int:
         now = self.clock()
@@ -250,15 +269,115 @@ class Importer:
             self.on_new()
         return inserted
 
-    def loop(self, stop: threading.Event, interval_seconds: int = 60) -> None:
+    def loop(self, stop: threading.Event) -> None:
         while not stop.is_set():
             try:
                 count = self.run_once()
                 if count:
-                    LOG.info("Imported %d reading(s) from %s", count, self.config.entity_id)
+                    LOG.info("Imported %d reading(s) from %s history", count, self.config.entity_id)
             except Exception as error:  # noqa: BLE001 - keep importing after a bad minute
                 LOG.warning("Import from %s failed: %s", self.config.entity_id, error)
-            stop.wait(interval_seconds)
+            self.wake.wait(self.poll_seconds)
+            self.wake.clear()
+
+
+class Watcher:
+    """Hears about the source sensor the moment Home Assistant changes it.
+
+    One idle websocket to the Supervisor's proxy, subscribed to state changes of the source
+    sensor only. Each change is stored straight from the event. While the subscription stands,
+    the history read is only a safety net every few minutes; when it drops, the importer goes
+    back to reading history every minute until the watcher is connected again.
+    """
+
+    PUSH_POLL_SECONDS = 300
+    FALLBACK_POLL_SECONDS = 60
+    PING_AFTER_SECONDS = 45
+
+    def __init__(self, api: CoreApi, importer: Importer, connect=WebSocket.connect):
+        self.api = api
+        self.importer = importer
+        self.connect = connect
+        self.connected = threading.Event()
+
+    @property
+    def url(self) -> str:
+        base = self.api.base_url
+        if base.endswith("/api"):
+            base = base[: -len("/api")]
+        return base.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + "/websocket"
+
+    def loop(self, stop: threading.Event) -> None:
+        backoff = 5
+        while not stop.is_set():
+            try:
+                self.run_session(stop)
+                backoff = 5
+            except Exception as error:  # noqa: BLE001 - reconnect whatever went wrong
+                if not stop.is_set():
+                    LOG.warning("Home Assistant websocket: %s; reconnecting in %ds", error, backoff)
+            finally:
+                self.connected.clear()
+                self.importer.poll_seconds = self.FALLBACK_POLL_SECONDS
+            if stop.wait(backoff):
+                return
+            backoff = min(backoff * 2, 300)
+
+    def run_session(self, stop: threading.Event) -> None:
+        ws = self.connect(self.url)
+        try:
+            self._authenticate(ws)
+            entity_id = self.importer.config.entity_id
+            ws.send_text(json.dumps({
+                "id": 1,
+                "type": "subscribe_trigger",
+                # A state trigger with only entity_id fires on attribute-only changes too,
+                # which is how a new measurement with an unchanged value arrives.
+                "trigger": {"platform": "state", "entity_id": entity_id},
+            }))
+            result = self._next_json(ws)
+            if result.get("type") != "result" or not result.get("success"):
+                raise ConnectionError(f"subscription refused: {result.get('error')}")
+            LOG.info("Listening for changes of %s", entity_id)
+            self.connected.set()
+            self.importer.poll_seconds = self.PUSH_POLL_SECONDS
+            self.importer.wake.set()  # one history read now, for whatever changed while away
+            ws.settimeout(self.PING_AFTER_SECONDS)
+            next_id, waiting_pong = 2, None
+            while not stop.is_set():
+                try:
+                    message = json.loads(ws.recv_text())
+                except socket.timeout:
+                    if waiting_pong is not None:
+                        raise ConnectionError("no answer to ping")
+                    waiting_pong = next_id
+                    next_id += 1
+                    ws.send_text(json.dumps({"id": waiting_pong, "type": "ping"}))
+                    continue
+                if message.get("type") == "pong" and message.get("id") == waiting_pong:
+                    waiting_pong = None
+                    continue
+                if message.get("type") == "event":
+                    trigger = ((message.get("event") or {}).get("variables") or {}).get("trigger") or {}
+                    state = trigger.get("to_state")
+                    if isinstance(state, dict) and self.importer.ingest_state(state):
+                        LOG.debug("Stored a reading pushed by Home Assistant")
+        finally:
+            ws.close()
+
+    def _authenticate(self, ws: WebSocket) -> None:
+        hello = self._next_json(ws)
+        if hello.get("type") != "auth_required":
+            raise ConnectionError(f"unexpected greeting {hello.get('type')!r}")
+        ws.send_text(json.dumps({"type": "auth", "access_token": self.api.token}))
+        answer = self._next_json(ws)
+        if answer.get("type") != "auth_ok":
+            raise ConnectionError(f"authentication refused: {answer.get('message') or answer.get('type')}")
+
+    @staticmethod
+    def _next_json(ws: WebSocket) -> dict:
+        message = json.loads(ws.recv_text())
+        return message if isinstance(message, dict) else {}
 
 
 # --------------------------------------------------------------------------- out

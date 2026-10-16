@@ -314,6 +314,270 @@ class SupervisorEnvironmentTests(unittest.TestCase):
             server.server_close()
 
 
+# --------------------------------------------------------------------------- websocket push
+
+
+import base64 as _b64
+import socket as _socket
+import struct as _struct
+
+from nslite.ha import Watcher  # noqa: E402
+from nslite.ws import WebSocket, WebSocketClosed  # noqa: E402
+
+
+class FakeWsPeer:
+    """The server side of one websocket connection, frames written by hand."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.buffer = b""
+
+    def _read(self, count):
+        while len(self.buffer) < count:
+            chunk = self.conn.recv(4096)
+            if not chunk:
+                raise ConnectionError("client gone")
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:count], self.buffer[count:]
+        return data
+
+    def handshake(self):
+        while b"\r\n\r\n" not in self.buffer:
+            self.buffer += self.conn.recv(4096)
+        head, self.buffer = self.buffer.split(b"\r\n\r\n", 1)
+        key = [line.split(":", 1)[1].strip() for line in head.decode().split("\r\n")
+               if line.lower().startswith("sec-websocket-key")][0]
+        accept = _b64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                           f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+        return head.decode().split("\r\n")[0]
+
+    def send_frame(self, opcode, payload, fin=True):
+        length = len(payload)
+        if length < 126:
+            header = bytes([(0x80 if fin else 0) | opcode, length])
+        elif length < 65536:
+            header = bytes([(0x80 if fin else 0) | opcode, 126]) + _struct.pack("!H", length)
+        else:
+            header = bytes([(0x80 if fin else 0) | opcode, 127]) + _struct.pack("!Q", length)
+        self.conn.sendall(header + payload)
+
+    def send_json(self, message):
+        self.send_frame(0x1, json.dumps(message).encode())
+
+    def recv_frame(self):
+        first, second = self._read(2)
+        assert second & 0x80, "client frames must be masked"
+        length = second & 0x7F
+        if length == 126:
+            length = _struct.unpack("!H", self._read(2))[0]
+        elif length == 127:
+            length = _struct.unpack("!Q", self._read(8))[0]
+        mask = self._read(4)
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(self._read(length)))
+        return first & 0x0F, payload
+
+    def recv_json(self):
+        while True:
+            opcode, payload = self.recv_frame()
+            if opcode == 0x1:
+                return json.loads(payload)
+
+
+class FakeWsServer:
+    def __init__(self, session):
+        self.session = session
+        self.sock = _socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        self.sessions = 0
+        self.paths = []
+        self.done = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while not self.done.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.sessions += 1
+            peer = FakeWsPeer(conn)
+            try:
+                self.paths.append(peer.handshake())
+                self.session(peer, self.sessions)
+            except Exception:  # noqa: BLE001 - the client hanging up ends a session
+                pass
+            finally:
+                conn.close()
+
+    def close(self):
+        self.done.set()
+        self.sock.close()
+
+
+class WebSocketTests(unittest.TestCase):
+    def test_frames_of_all_sizes_fragments_and_pings(self):
+        big = "x" * 70_000
+        def session(peer, _):
+            peer.send_frame(0x9, b"hi")  # ping first: the client must answer pong
+            opcode, payload = peer.recv_frame()
+            assert (opcode, payload) == (0xA, b"hi")
+            peer.send_json({"small": 1})
+            peer.send_frame(0x1, json.dumps({"mid": "y" * 300}).encode())
+            peer.send_frame(0x1, json.dumps({"big": big}).encode())
+            text = json.dumps({"parts": "abc"}).encode()
+            peer.send_frame(0x1, text[:5], fin=False)
+            peer.send_frame(0x0, text[5:])
+            echoed = peer.recv_json()
+            peer.send_json({"echo": echoed})
+            peer.send_frame(0x8, _struct.pack("!H", 1000))
+            time.sleep(0.2)
+        server = FakeWsServer(session)
+        try:
+            ws = WebSocket.connect(f"ws://127.0.0.1:{server.port}/core/websocket")
+            self.assertEqual(json.loads(ws.recv_text()), {"small": 1})
+            self.assertEqual(len(json.loads(ws.recv_text())["mid"]), 300)
+            self.assertEqual(len(json.loads(ws.recv_text())["big"]), 70_000)
+            self.assertEqual(json.loads(ws.recv_text()), {"parts": "abc"})
+            ws.send_text(json.dumps({"long": "z" * 70_000}))
+            self.assertEqual(len(json.loads(ws.recv_text())["echo"]["long"]), 70_000)
+            with self.assertRaises(WebSocketClosed):
+                ws.recv_text()
+            ws.close()
+            self.assertEqual(server.paths[0], "GET /core/websocket HTTP/1.1")
+        finally:
+            server.close()
+
+    def test_idle_timeout_is_a_timeout(self):
+        def session(peer, _):
+            time.sleep(1)
+        server = FakeWsServer(session)
+        try:
+            ws = WebSocket.connect(f"ws://127.0.0.1:{server.port}/websocket")
+            ws.settimeout(0.2)
+            with self.assertRaises(_socket.timeout):
+                ws.recv_text()
+            ws.close()
+        finally:
+            server.close()
+
+
+class WatcherTests(unittest.TestCase):
+    def make(self, session):
+        server = FakeWsServer(session)
+        store = temp_store(clock=lambda: int(time.time() * 1000))
+        core = CoreApi(base_url=f"http://127.0.0.1:{server.port}/api", token="supervisor-token")
+        notified = []
+        importer = Importer(core, store, SourceConfig("sensor.tomas_krnac_glucose_level"), 10,
+                            on_new=lambda: notified.append(1))
+        watcher = Watcher(core, importer)
+        watcher.PING_AFTER_SECONDS = 0.3
+        return server, store, importer, watcher, notified
+
+    def test_push_stores_readings_and_slows_the_poll(self):
+        received = {}
+        now = int(time.time() * 1000)
+
+        def session(peer, number):
+            peer.send_json({"type": "auth_required"})
+            received["auth"] = peer.recv_json()
+            peer.send_json({"type": "auth_ok"})
+            received["subscribe"] = peer.recv_json()
+            peer.send_json({"id": 1, "type": "result", "success": True})
+            to_state = {
+                "entity_id": "sensor.tomas_krnac_glucose_level", "state": "6.8",
+                "attributes": {"unit_of_measurement": "mmol/L", "value_mg_dl": 122, "trend": "decreasing",
+                               "measurement_timestamp": util.iso_utc(now - 20_000)},
+                "last_changed": util.iso_utc(now), "last_updated": util.iso_utc(now),
+            }
+            peer.send_json({"id": 1, "type": "event", "event": {"variables": {"trigger": {"to_state": to_state}}}})
+            # The watcher pings when idle; answer it, then drop the connection.
+            ping = peer.recv_json()
+            peer.send_json({"id": ping["id"], "type": "pong"})
+            received["ping"] = ping
+            time.sleep(0.2)
+
+        server, store, importer, watcher, notified = self.make(session)
+        stop = threading.Event()
+        thread = threading.Thread(target=watcher.loop, args=(stop,), daemon=True)
+        thread.start()
+        try:
+            for _ in range(100):
+                if store.latest_entry() and "ping" in received:
+                    break
+                time.sleep(0.05)
+            entry = store.latest_entry()
+            self.assertEqual((entry["sgv"], entry["direction"]), (122, "FortyFiveDown"))
+            self.assertEqual(entry["date"], now - 20_000)
+            self.assertEqual(received["auth"], {"type": "auth", "access_token": "supervisor-token"})
+            self.assertEqual(received["subscribe"]["type"], "subscribe_trigger")
+            self.assertEqual(received["subscribe"]["trigger"],
+                             {"platform": "state", "entity_id": "sensor.tomas_krnac_glucose_level"})
+            self.assertEqual(received["ping"]["type"], "ping")
+            self.assertEqual(server.paths[0], "GET /websocket HTTP/1.1")
+            self.assertEqual(notified, [1])
+            # After the drop the history poll returns to every minute until reconnected.
+            for _ in range(60):
+                if not watcher.connected.is_set():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(importer.poll_seconds, Watcher.FALLBACK_POLL_SECONDS)
+        finally:
+            stop.set()
+            thread.join(5)
+            server.close()
+
+    def test_poll_is_slow_only_while_subscribed(self):
+        def session(peer, number):
+            peer.send_json({"type": "auth_required"})
+            peer.recv_json()
+            peer.send_json({"type": "auth_ok"})
+            peer.recv_json()
+            peer.send_json({"id": 1, "type": "result", "success": True})
+            time.sleep(1)
+
+        server, store, importer, watcher, _ = self.make(session)
+        watcher.PING_AFTER_SECONDS = 5
+        stop = threading.Event()
+        thread = threading.Thread(target=watcher.loop, args=(stop,), daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(watcher.connected.wait(3))
+            self.assertEqual(importer.poll_seconds, Watcher.PUSH_POLL_SECONDS)
+            self.assertTrue(importer.wake.is_set())  # catch-up read requested on connect
+        finally:
+            stop.set()
+            thread.join(5)
+            server.close()
+
+    def test_refused_token_falls_back_to_polling(self):
+        def session(peer, _):
+            peer.send_json({"type": "auth_required"})
+            peer.recv_json()
+            peer.send_json({"type": "auth_invalid", "message": "Invalid access token"})
+
+        server, store, importer, watcher, _ = self.make(session)
+        try:
+            with self.assertRaises(ConnectionError) as caught:
+                watcher.run_session(threading.Event())
+            self.assertIn("Invalid access token", str(caught.exception))
+            self.assertEqual(importer.poll_seconds, 60)
+        finally:
+            server.close()
+
+    def test_url_from_supervisor_api(self):
+        self.assertEqual(Watcher(CoreApi(base_url="http://supervisor/core/api", token="t"), None).url,
+                         "ws://supervisor/core/websocket")
+
+    def test_pushed_state_for_another_entity_is_ignored(self):
+        store = temp_store()
+        importer = Importer(FakeCore(), store, SourceConfig("sensor.a"), 10, clock=lambda: NOW_MS)
+        self.assertEqual(importer.ingest_state(ha_state(120, "2026-10-16T08:21:00Z") | {"entity_id": "sensor.b"}), 0)
+        self.assertEqual(importer.ingest_state(ha_state(120, "2026-10-16T08:21:00Z") | {"entity_id": "sensor.a"}), 1)
+
+
 # --------------------------------------------------------------------------- end to end
 
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .api import MAX_BODY_BYTES, NightscoutApi
-from .ha import CoreApi, Importer, Publisher, SourceConfig, container_env
+from .ha import CoreApi, Importer, Publisher, SourceConfig, Watcher, container_env
 from .store import Store
 
 LOG = logging.getLogger("nightscout_lite")
@@ -189,6 +189,7 @@ class App:
             if core is not None and options.source_entity_id
             else None
         )
+        self.watcher = Watcher(core, self.importer) if self.importer is not None else None
         self.api = NightscoutApi(
             store,
             read_secret=options.api_secret,
@@ -206,6 +207,8 @@ class App:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         if self.importer:
             threading.Thread(target=self.importer.loop, args=(self.stop,), daemon=True).start()
+        if self.watcher:
+            threading.Thread(target=self.watcher.loop, args=(self.stop,), daemon=True).start()
         if self.publisher:
             threading.Thread(target=self.publisher.loop, args=(self.stop,), daemon=True).start()
         if self.options.keep_days:
@@ -219,6 +222,8 @@ class App:
 
     def shutdown(self) -> None:
         self.stop.set()
+        if self.importer:
+            self.importer.wake.set()
         if self.publisher:
             self.publisher.notify()
         for server in self.servers:
