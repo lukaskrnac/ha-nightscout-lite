@@ -29,6 +29,9 @@ configuration:
   keep_days:
     name: Keep days
     description: Delete readings older than this. 0 keeps everything.
+  hold_seconds:
+    name: Hold seconds
+    description: A follower poll that would bring nothing new waits up to this long for the next reading, so the follower's polls line up with the readings. 0 turns it off.
 network:
   1337/tcp: Nightscout API, read-only (safe to publish)
   1338/tcp: Nightscout API, read and write (keep private)

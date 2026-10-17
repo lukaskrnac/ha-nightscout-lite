@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -32,6 +34,13 @@ ENTRY_TYPE_PATHS = {
     "/api/v1/entries/current": ["sgv"],
 }
 EMPTY_ARRAY_PATHS = {"/api/v1/profile", "/api/v1/food", "/api/v1/activity"}
+# Where a client's newest reading sits relative to the lower bound it asks from. JugglucoNG asks
+# from its newest stored reading minus five minutes; a client asking from its newest itself is
+# the zero case.
+CLIENT_NEWEST_OFFSETS_MS = (0, 5 * MINUTE_MS)
+CLIENT_NEWEST_TOLERANCE_MS = 1_000
+HOLD_PATHS = {"/api/v1/entries", "/api/v1/entries/sgv"}
+
 TREATMENT_ID_RE = re.compile(r"^/api/v1/treatments/([A-Za-z0-9_\-:.]{1,128})$")
 ENTRY_ID_RE = re.compile(r"^/api/v1/entries/([0-9a-fA-F]{24})$")
 
@@ -56,6 +65,7 @@ class NightscoutApi:
         display_units: str = "mg/dl",
         on_write: Callable[[], None] = lambda: None,
         clock=now_ms,
+        hold_seconds: float = 0,
     ):
         self.store = store
         self.read_secret = read_secret
@@ -63,6 +73,49 @@ class NightscoutApi:
         self.display_units = display_units
         self.on_write = on_write
         self.clock = clock
+        self.hold_seconds = hold_seconds
+        self._new_reading = threading.Condition()
+        self._generation = 0
+
+    # ------------------------------------------------------------------ holding
+
+    def notify_new_reading(self) -> None:
+        """Wakes requests waiting for a reading newer than the one their client has."""
+        with self._new_reading:
+            self._generation += 1
+            self._new_reading.notify_all()
+
+    def _client_is_current(self, lower_bound: int) -> bool:
+        """Whether the client already has the newest stored reading.
+
+        Known only from the lower bound it asks from: the newest reading sits exactly where
+        that client's own newest would be (see CLIENT_NEWEST_OFFSETS_MS). Anything else gets
+        an immediate answer, so a client this does not recognise is never kept waiting.
+        """
+        newest = self.store.latest_entry("sgv")
+        if newest is None:
+            return False
+        return any(
+            abs(newest["date"] - (lower_bound + offset)) <= CLIENT_NEWEST_TOLERANCE_MS
+            for offset in CLIENT_NEWEST_OFFSETS_MS
+        )
+
+    def _hold_until_new(self, lower_bound: int) -> None:
+        """Answers a poll that would bring nothing new when the next reading arrives instead.
+
+        A follower that schedules its next poll a fixed interval after the previous one
+        finished then lands just after each new reading, rather than up to a minute after it.
+        """
+        if self.hold_seconds <= 0 or not self._client_is_current(lower_bound):
+            return
+        deadline = time.monotonic() + self.hold_seconds
+        with self._new_reading:
+            seen = self._generation
+            while self._generation == seen:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._new_reading.wait(remaining)
 
     # ------------------------------------------------------------------ dispatch
 
@@ -101,6 +154,8 @@ class NightscoutApi:
         if path in ENTRY_TYPE_PATHS:
             current = path.endswith("/current")
             query = parse_query(params, default_count=1 if current else 10)
+            if path in HOLD_PATHS and query.lower_bound() is not None and query.upper_bound() is None:
+                self._hold_until_new(query.lower_bound())
             types = ENTRY_TYPE_PATHS[path]
             if types is None:
                 wanted = (query.equals or {}).get("type")

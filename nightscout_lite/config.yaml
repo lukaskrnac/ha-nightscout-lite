@@ -1,5 +1,5 @@
 name: Nightscout Lite
-version: "0.3.0"
+version: "0.3.1"
 slug: nightscout_lite
 description: Minimal Nightscout-compatible server inside Home Assistant
 url: https://github.com/lukaskrnac/ha-nightscout-lite
@@ -29,6 +29,7 @@ options:
   publish_entity_id: sensor.nightscout_glucose
   display_units: mg/dl
   keep_days: 0
+  hold_seconds: 20
 schema:
   api_secret: password
   write_secret: password?
@@ -40,3 +41,4 @@ schema:
   publish_entity_id: str?
   display_units: list(mg/dl|mmol)
   keep_days: int(0,3650)
+  hold_seconds: int(0,25)

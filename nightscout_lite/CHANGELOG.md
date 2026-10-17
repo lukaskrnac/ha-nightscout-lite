@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- A follower poll that would bring nothing new (the client already has the newest reading) is
+  held until the next reading arrives, up to `hold_seconds` (20 by default). JugglucoNG
+  schedules its next poll a fixed interval after the previous one finished, so its polls then
+  line up just after each reading instead of landing up to a minute late. Clients the add-on
+  cannot tell are up to date are answered at once, as before.
+
 ## 0.3.0
 
 - Readings from the source sensor are pushed: the add-on keeps one idle websocket to Home

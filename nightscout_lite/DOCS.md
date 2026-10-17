@@ -48,6 +48,18 @@ minutes, which fills anything missed while the add-on or the websocket was down.
 websocket cannot be kept up, that history read runs every minute instead. On first start it
 imports `import_days` of history, half a day per request.
 
+## Followers in step with the readings
+
+A follower asks every minute, but nothing ties that minute to when readings arrive, so a
+reading can wait up to a minute for the next poll. When a poll would bring nothing new (the
+follower already has the newest reading), the add-on holds the answer until the next reading
+arrives, up to `hold_seconds`. JugglucoNG counts its next minute from the end of the previous
+poll, so after one held poll its polls land just after each reading, and stay there. A held
+poll costs the phone nothing but an open connection for those seconds.
+
+The add-on recognises an up-to-date JugglucoNG from the lower bound it asks from; any request
+it cannot tell is up to date is answered at once. Set `hold_seconds` to 0 to turn this off.
+
 ## The Home Assistant entity
 
 `sensor.nightscout_glucose` gets each new reading within seconds, with `measured_at`,

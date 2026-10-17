@@ -314,6 +314,103 @@ class SupervisorEnvironmentTests(unittest.TestCase):
             server.server_close()
 
 
+# --------------------------------------------------------------------------- holding polls
+
+
+from nslite.api import NightscoutApi  # noqa: E402
+
+
+class HoldTests(unittest.TestCase):
+    def setUp(self):
+        self.store = temp_store(clock=lambda: int(time.time() * 1000))
+        self.now = int(time.time() * 1000) // 1000 * 1000
+        self.store.insert_entries([{"type": "sgv", "sgv": 120, "date": self.now - 60_000}], "upload")
+
+    def api(self, hold):
+        return NightscoutApi(self.store, READ_SECRET, "", hold_seconds=hold)
+
+    def ask(self, api, gte):
+        path = f"/api/v1/entries/sgv.json?count=1000&{urllib.parse.quote('find[date][$gte]')}={gte}"
+        started = time.monotonic()
+        response = api.handle("GET", path, {"api-secret": sha(READ_SECRET)}, b"", writable=False)
+        return response, time.monotonic() - started
+
+    def add_later(self, api, delay, sgv, date):
+        def run():
+            time.sleep(delay)
+            self.store.insert_entries([{"type": "sgv", "sgv": sgv, "date": date}], "upload")
+            api.notify_new_reading()
+        threading.Thread(target=run, daemon=True).start()
+
+    def test_up_to_date_jugglucong_waits_for_the_next_reading(self):
+        api = self.api(2)
+        self.add_later(api, 0.3, 125, self.now)
+        # JugglucoNG asks from its newest stored reading minus five minutes.
+        response, took = self.ask(api, self.now - 60_000 - 5 * MIN)
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.body[0]["sgv"], 125)
+        self.assertGreater(took, 0.25)
+        self.assertLess(took, 1.5)
+
+    def test_hold_ends_after_hold_seconds_without_a_reading(self):
+        response, took = self.ask(self.api(0.4), self.now - 60_000 - 5 * MIN)
+        self.assertEqual(response.body[0]["sgv"], 120)
+        self.assertGreater(took, 0.35)
+        self.assertLess(took, 1.0)
+
+    def test_client_that_is_behind_or_unknown_is_answered_at_once(self):
+        api = self.api(2)
+        for gte in (self.now - 30 * MIN, self.now - 60_000 - 2 * MIN, self.now - 60_000 - 30_000):
+            _, took = self.ask(api, gte)
+            self.assertLess(took, 0.2, gte)
+        # A client asking from its own newest reading is held too.
+        self.add_later(api, 0.2, 126, self.now)
+        response, took = self.ask(api, self.now - 60_000)
+        self.assertEqual((response.body[0]["sgv"], took > 0.15), (126, True))
+
+    def test_off_when_zero_and_without_lower_bound(self):
+        _, took = self.ask(self.api(0), self.now - 60_000 - 5 * MIN)
+        self.assertLess(took, 0.2)
+        started = time.monotonic()
+        self.api(2).handle("GET", "/api/v1/entries.json?count=5", {"api-secret": sha(READ_SECRET)}, b"", False)
+        self.assertLess(time.monotonic() - started, 0.2)
+
+    def test_follower_lines_up_with_readings(self):
+        """A JugglucoNG-like follower, at 1/2 s per "minute", ends up polling just after each reading."""
+        tick = 0.5
+        api = self.api(tick * 0.8)
+        stop = threading.Event()
+        arrivals = {}
+
+        def source():
+            n = 0
+            while not stop.is_set():
+                time.sleep(tick)
+                n += 1
+                date = self.now + n * 60_000
+                self.store.insert_entries([{"type": "sgv", "sgv": 120 + n, "date": date}], "upload")
+                arrivals[date] = time.monotonic()
+                api.notify_new_reading()
+
+        threading.Thread(target=source, daemon=True).start()
+        time.sleep(tick * 0.3)  # start the follower out of step: just after a reading would be ideal
+        newest = self.now - 60_000
+        lags = []
+        try:
+            for _ in range(7):
+                response, _ = self.ask(api, newest - 5 * MIN)
+                got = response.body[0]["date"]
+                if got > newest and got in arrivals:
+                    lags.append(time.monotonic() - arrivals[got])
+                newest = max(newest, got)
+                time.sleep(tick)  # the next poll one interval after this one finished
+        finally:
+            stop.set()
+        self.assertGreaterEqual(len(lags), 5)
+        # Once in step, a reading reaches the follower within a small part of the interval.
+        self.assertTrue(all(lag < tick * 0.2 for lag in lags[2:]), lags)
+
+
 # --------------------------------------------------------------------------- websocket push
 
 
@@ -702,6 +799,28 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual((code, set(status)), (200, {"status", "apiEnabled", "authorized"}))
         code, auth = self.call(self.write, "/api/v1/verifyauth", secret=WRITE_SECRET)
         self.assertTrue(auth["message"]["canWrite"])
+
+    def test_upload_wakes_a_held_follower(self):
+        now = int(time.time() * 1000) // 1000 * 1000
+        self.call(self.write, "/api/v1/entries", "POST", [self.jugglucong_entry(110, now - MIN)], WRITE_SECRET)
+        self.app.api.hold_seconds = 3
+        result = {}
+
+        def follow():
+            gte = urllib.parse.quote("find[date][$gte]")
+            started = time.monotonic()
+            result["answer"] = self.call(self.read, f"/api/v1/entries/sgv.json?count=1000&{gte}={now - MIN - 5 * MIN}",
+                                         secret=READ_SECRET)
+            result["took"] = time.monotonic() - started
+
+        thread = threading.Thread(target=follow)
+        thread.start()
+        time.sleep(0.4)
+        self.call(self.write, "/api/v1/entries", "POST", [self.jugglucong_entry(114, now)], WRITE_SECRET)
+        thread.join(5)
+        code, entries = result["answer"]
+        self.assertEqual((code, entries[0]["sgv"]), (200, 114))
+        self.assertLess(result["took"], 2)
 
     def test_bad_upload_is_explained(self):
         code, body = self.call(self.write, "/api/v1/entries", "POST", [{"type": "sgv", "sgv": 4000, "date": NOW_MS}],

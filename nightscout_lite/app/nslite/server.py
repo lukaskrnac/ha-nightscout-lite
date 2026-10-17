@@ -33,6 +33,7 @@ class Options:
     publish_entity_id: str = "sensor.nightscout_glucose"
     display_units: str = "mg/dl"
     keep_days: int = 0
+    hold_seconds: int = 20
 
 
 def load_options(path: str) -> Options:
@@ -53,6 +54,8 @@ def load_options(path: str) -> Options:
         publish_entity_id=text("publish_entity_id"),
         display_units="mmol" if text("display_units").lower().startswith("mmol") else "mg/dl",
         keep_days=max(0, int(raw.get("keep_days") or 0)),
+        # 25 at most: JugglucoNG gives up on an answer after 30 seconds.
+        hold_seconds=max(0, min(int(raw["hold_seconds"]) if raw.get("hold_seconds") is not None else 20, 25)),
     )
     validate(options)
     return options
@@ -172,7 +175,14 @@ class App:
             if core is not None and options.publish_entity_id
             else None
         )
-        notify = self.publisher.notify if self.publisher else (lambda: None)
+        # Filled in below, once the API exists: every new reading wakes the publisher and any
+        # follower request waiting for it.
+        listeners: list = [self.publisher.notify] if self.publisher else []
+
+        def notify() -> None:
+            for listener in listeners:
+                listener()
+
         self.importer = (
             Importer(
                 core,
@@ -196,7 +206,9 @@ class App:
             write_secret=options.write_secret,
             display_units=options.display_units,
             on_write=notify,
+            hold_seconds=options.hold_seconds,
         )
+        listeners.append(self.api.notify_new_reading)
         self.servers: list[QuietServer] = []
 
     def start(self, host: str = "0.0.0.0", read_port: int = READ_PORT, write_port: int = WRITE_PORT) -> None:
