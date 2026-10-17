@@ -10,8 +10,9 @@ whole rhythm there. The right moment is "measurement + D", where D is how long a
 to reach the cloud; D is a setting, because it cannot be told apart from the integration's own
 waiting by watching readings arrive.
 
-The aligner only acts when readings keep arriving later than D allows, and backs off when
-nudging does not help (D set too short: the poll comes before the reading is there).
+The aligner only watches that readings arrive within D (plus a tolerance) and nudges when they
+keep arriving later. Whether D itself is right is left to the person setting it: too short, and
+the nudged poll comes before the reading is there, so readings show up a minute late.
 """
 
 from __future__ import annotations
@@ -31,9 +32,7 @@ MINUTE_S = 60.0
 class SourceAligner:
     TOLERANCE_S = 10.0  # a reading this much later than D still counts as in step
     LATE_READINGS_TO_ACT = 3  # consecutive late readings before a nudge
-    MIN_NUDGE_SPACING_S = 300.0
-    FAILED_NUDGES_TO_PAUSE = 2
-    PAUSE_S = 3600.0
+    MIN_NUDGE_SPACING_S = 300.0  # at most one extra poll per five minutes, whatever happens
     LEAD_S = 2.0  # never schedule a nudge closer than this to now
     REPORT_EVERY = 30  # readings between lag summaries in the log
 
@@ -54,9 +53,6 @@ class SourceAligner:
         self._lock = threading.Lock()
         self._late_streak = 0
         self._last_nudge_at = 0.0
-        self._nudge_unconfirmed = False
-        self._failed_nudges = 0
-        self._paused_until = 0.0
         self._pending = False
         self._seen = 0
 
@@ -92,30 +88,12 @@ class SourceAligner:
             now = self.clock()
             if lag <= self.delay_seconds + self.TOLERANCE_S:
                 self._late_streak = 0
-                if self._nudge_unconfirmed:
-                    LOG.info("Source integration in step: reading %.0f s after measurement", lag)
-                    self._nudge_unconfirmed = False
-                    self._failed_nudges = 0
                 return lag
             self._late_streak += 1
             if self._late_streak < self.LATE_READINGS_TO_ACT:
                 return lag
-            if now < self._paused_until or now - self._last_nudge_at < self.MIN_NUDGE_SPACING_S:
+            if now - self._last_nudge_at < self.MIN_NUDGE_SPACING_S:
                 return lag
-            if self._nudge_unconfirmed:
-                self._failed_nudges += 1
-                if self._failed_nudges >= self.FAILED_NUDGES_TO_PAUSE:
-                    LOG.warning(
-                        "Nudging %s did not bring readings closer than %.0f s (still %.0f s): "
-                        "source_delay_seconds (%.0f) is probably too short, so its poll comes "
-                        "before the reading is there. Pausing for an hour; raise the setting.",
-                        self.entity_id, self.delay_seconds + self.TOLERANCE_S, lag, self.delay_seconds,
-                    )
-                    self._paused_until = now + self.PAUSE_S
-                    self._failed_nudges = 0
-                    self._nudge_unconfirmed = False
-                    self._late_streak = 0
-                    return lag
             target = measured_ms / 1000.0 + self.delay_seconds
             while target < now + self.LEAD_S:
                 target += MINUTE_S
@@ -139,4 +117,3 @@ class SourceAligner:
             with self._lock:
                 self._pending = False
                 self._last_nudge_at = self.clock()
-                self._nudge_unconfirmed = True

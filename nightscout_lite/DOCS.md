@@ -61,9 +61,9 @@ more than D + 10 s after they were measured, the add-on asks the source sensor t
 integration's next minute from any refresh, so its polls then stay there. This moves the poll;
 it does not add any.
 
-If D is too short the poll comes before the reading is there, and readings arrive a minute
-late instead. After two nudges that did not help, the add-on stops for an hour and writes a
-warning to the log: raise D a little. To choose D, look at `source_lag_seconds` on
+The add-on does not judge D itself. If D is too short, the poll comes before the reading is
+there and readings arrive a minute late (and the add-on keeps nudging, at most once every 5
+minutes): raise D a little. To choose D, look at `source_lag_seconds` on
 `sensor.nightscout_glucose` or at the lag summary in the log every 30 readings.
 
 The nudge is the add-on's only call to a Home Assistant service, and it is only made with D set.

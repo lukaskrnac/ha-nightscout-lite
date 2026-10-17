@@ -498,32 +498,18 @@ class AlignerTests(unittest.TestCase):
         self.assertEqual(self.scheduled, [])
         self.assertAlmostEqual(aligner.median_lag(), self.D + 1)
 
-    def test_too_short_d_pauses_after_two_failed_nudges(self):
+    def test_readings_that_stay_late_get_at_most_one_nudge_per_five_minutes(self):
+        # D set too short: every nudge lands before the reading is there, readings stay late.
         aligner = self.make(delay=5)
-        minute = 0
-        def late_run(lag):
-            nonlocal minute
-            for _ in range(3):
-                self.reading(aligner, minute, lag)
-                minute += 1
-        late_run(40)
-        self.run_scheduled()  # nudge 1: too early, the reading is not there yet
-        # Readings now arrive a minute late; spacing keeps the second nudge 5 minutes away.
-        late_run(65)
-        self.assertEqual(self.scheduled, [])
-        minute += 3
-        late_run(65)
-        self.run_scheduled()  # nudge 2
-        minute += 5
-        with self.assertLogs("nightscout_lite.align", level="WARNING") as logs:
-            late_run(65)
-        self.assertIn("too short", logs.output[0])
-        self.assertEqual(self.scheduled, [])
-        self.assertEqual(len(self.calls), 2)
-        # Paused for an hour, even though readings stay late.
-        minute += 20
-        late_run(65)
-        self.assertEqual(self.scheduled, [])
+        nudged_at = []
+        for minute in range(30):
+            self.reading(aligner, minute, 65)
+            while self.scheduled:
+                self.run_scheduled()
+                nudged_at.append(self.now[0])
+        self.assertGreaterEqual(len(nudged_at), 4)
+        self.assertTrue(all(b - a >= 300 for a, b in zip(nudged_at, nudged_at[1:])), nudged_at)
+        # No warnings and no pause: whether D is right is the person's call.
 
     def test_disabled_only_measures(self):
         aligner = self.make(delay=0)

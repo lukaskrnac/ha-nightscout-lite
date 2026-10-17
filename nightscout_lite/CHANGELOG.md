@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- Source alignment only keeps the integration at D: no guessing whether D is too short and no
+  pausing. Readings still late after a nudge get the next nudge 5 minutes later at the earliest.
+  If D is too short, readings come a minute late; raise D.
+
 ## 0.4.0
 
 - `source_delay_seconds` (D, off by default): keeps the source integration polling D seconds
