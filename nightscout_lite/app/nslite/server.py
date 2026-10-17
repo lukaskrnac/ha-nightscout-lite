@@ -34,6 +34,7 @@ class Options:
     display_units: str = "mg/dl"
     keep_days: int = 0
     hold_seconds: int = 20
+    resync_after_seconds: int = 20
 
 
 def load_options(path: str) -> Options:
@@ -56,6 +57,9 @@ def load_options(path: str) -> Options:
         keep_days=max(0, int(raw.get("keep_days") or 0)),
         # 25 at most: JugglucoNG gives up on an answer after 30 seconds.
         hold_seconds=max(0, min(int(raw["hold_seconds"]) if raw.get("hold_seconds") is not None else 20, 25)),
+        resync_after_seconds=max(
+            0, min(int(raw["resync_after_seconds"]) if raw.get("resync_after_seconds") is not None else 20, 55)
+        ),
     )
     validate(options)
     return options
@@ -207,6 +211,7 @@ class App:
             display_units=options.display_units,
             on_write=notify,
             hold_seconds=options.hold_seconds,
+            resync_after_seconds=options.resync_after_seconds,
         )
         listeners.append(self.api.notify_new_reading)
         self.servers: list[QuietServer] = []

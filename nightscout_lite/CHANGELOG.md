@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+- Holding follower polls no longer tries to recognise the client. The rule is time alone, and
+  both numbers are settings: when the newest reading is older than `resync_after_seconds` (20),
+  a follower poll waits for the next reading, up to `hold_seconds` (20). This keeps a follower
+  that is a little faster than the readings in step, and pulls one that is a little slower back
+  into step whenever it has drifted past the threshold.
+- Only incremental follower polls ("since" a time, no end) are held, and only for sources
+  reporting at least every two minutes.
+
 ## 0.3.1
 
 - A follower poll that would bring nothing new (the client already has the newest reading) is

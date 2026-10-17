@@ -34,12 +34,10 @@ ENTRY_TYPE_PATHS = {
     "/api/v1/entries/current": ["sgv"],
 }
 EMPTY_ARRAY_PATHS = {"/api/v1/profile", "/api/v1/food", "/api/v1/activity"}
-# Where a client's newest reading sits relative to the lower bound it asks from. JugglucoNG asks
-# from its newest stored reading minus five minutes; a client asking from its newest itself is
-# the zero case.
-CLIENT_NEWEST_OFFSETS_MS = (0, 5 * MINUTE_MS)
-CLIENT_NEWEST_TOLERANCE_MS = 1_000
 HOLD_PATHS = {"/api/v1/entries", "/api/v1/entries/sgv"}
+# Holding pays off only when the next reading is never far off; readings further apart than
+# this (a five-minute sensor, say) are never waited for.
+MINUTE_CADENCE_MAX_MS = 2 * MINUTE_MS
 
 TREATMENT_ID_RE = re.compile(r"^/api/v1/treatments/([A-Za-z0-9_\-:.]{1,128})$")
 ENTRY_ID_RE = re.compile(r"^/api/v1/entries/([0-9a-fA-F]{24})$")
@@ -66,6 +64,7 @@ class NightscoutApi:
         on_write: Callable[[], None] = lambda: None,
         clock=now_ms,
         hold_seconds: float = 0,
+        resync_after_seconds: float = 0,
     ):
         self.store = store
         self.read_secret = read_secret
@@ -74,6 +73,7 @@ class NightscoutApi:
         self.on_write = on_write
         self.clock = clock
         self.hold_seconds = hold_seconds
+        self.resync_after_seconds = resync_after_seconds
         self._new_reading = threading.Condition()
         self._generation = 0
 
@@ -85,37 +85,47 @@ class NightscoutApi:
             self._generation += 1
             self._new_reading.notify_all()
 
-    def _client_is_current(self, lower_bound: int) -> bool:
-        """Whether the client already has the newest stored reading.
+    def hold_reason(self) -> str | None:
+        """Whether a follower's poll should wait for the next reading; None answers at once.
 
-        Known only from the lower bound it asks from: the newest reading sits exactly where
-        that client's own newest would be (see CLIENT_NEWEST_OFFSETS_MS). Anything else gets
-        an immediate answer, so a client this does not recognise is never kept waiting.
+        Decided from time alone, whoever is asking: when the newest reading has been here
+        longer than `resync_after_seconds`, the next one is due soon or the poll has drifted
+        behind the readings. Either way waiting for it, up to `hold_seconds`, moves the
+        follower's next poll (counted from when this one is answered) to just after a reading.
         """
-        newest = self.store.latest_entry("sgv")
-        if newest is None:
-            return False
-        return any(
-            abs(newest["date"] - (lower_bound + offset)) <= CLIENT_NEWEST_TOLERANCE_MS
-            for offset in CLIENT_NEWEST_OFFSETS_MS
-        )
+        if self.hold_seconds <= 0:
+            return None
+        latest = self.store.query_entries(["sgv"], 2)
+        if len(latest) < 2:
+            return None
+        newest, previous = latest
+        if newest["date"] - previous["date"] > MINUTE_CADENCE_MAX_MS:
+            return None
+        arrived = newest.get("srvModified") or newest["date"]
+        age_ms = self.clock() - arrived
+        if age_ms < self.resync_after_seconds * 1000:
+            return None
+        return f"newest reading {age_ms / 1000:.0f} s old"
 
-    def _hold_until_new(self, lower_bound: int) -> None:
-        """Answers a poll that would bring nothing new when the next reading arrives instead.
+    def _hold_until_new(self) -> None:
+        """Answers a held poll when the next reading arrives, or after `hold_seconds`.
 
         A follower that schedules its next poll a fixed interval after the previous one
         finished then lands just after each new reading, rather than up to a minute after it.
         """
-        if self.hold_seconds <= 0 or not self._client_is_current(lower_bound):
+        reason = self.hold_reason()
+        if reason is None:
             return
-        deadline = time.monotonic() + self.hold_seconds
+        started = time.monotonic()
+        deadline = started + self.hold_seconds
         with self._new_reading:
             seen = self._generation
             while self._generation == seen:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return
+                    break
                 self._new_reading.wait(remaining)
+        LOG.debug("Held a follower poll (%s) for %.1f s", reason, time.monotonic() - started)
 
     # ------------------------------------------------------------------ dispatch
 
@@ -154,8 +164,10 @@ class NightscoutApi:
         if path in ENTRY_TYPE_PATHS:
             current = path.endswith("/current")
             query = parse_query(params, default_count=1 if current else 10)
+            # Followers syncing incrementally ask "everything since X"; a request for a fixed
+            # range or a plain "last N" (a browser, a report) is never held.
             if path in HOLD_PATHS and query.lower_bound() is not None and query.upper_bound() is None:
-                self._hold_until_new(query.lower_bound())
+                self._hold_until_new()
             types = ENTRY_TYPE_PATHS[path]
             if types is None:
                 wanted = (query.equals or {}).get("type")

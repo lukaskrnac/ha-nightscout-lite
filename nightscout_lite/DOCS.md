@@ -50,15 +50,25 @@ imports `import_days` of history, half a day per request.
 
 ## Followers in step with the readings
 
-A follower asks every minute, but nothing ties that minute to when readings arrive, so a
-reading can wait up to a minute for the next poll. When a poll would bring nothing new (the
-follower already has the newest reading), the add-on holds the answer until the next reading
-arrives, up to `hold_seconds`. JugglucoNG counts its next minute from the end of the previous
-poll, so after one held poll its polls land just after each reading, and stay there. A held
-poll costs the phone nothing but an open connection for those seconds.
+A follower asks every minute, but nothing ties its minute to when readings arrive, so a reading
+can wait up to a minute for the next poll. Two settings line them up:
 
-The add-on recognises an up-to-date JugglucoNG from the lower bound it asks from; any request
-it cannot tell is up to date is answered at once. Set `hold_seconds` to 0 to turn this off.
+* `resync_after_seconds` (20): when a follower poll comes and the newest reading has been here
+  longer than this, the answer waits for the next reading;
+* `hold_seconds` (20): for at most this long. Then it is answered with what there is.
+
+A poll answered right after a reading makes the follower's next poll, counted from that answer,
+land just after the next reading too. Whether the follower is a little faster or a little
+slower than the readings, its poll ends up either just before a reading (held a moment, then
+in step) or drifting later until it passes the threshold (held, moved later, then in step
+again). Between those resyncs a reading reaches the follower within about the threshold, and
+each resync delays a reading or two by up to `hold_seconds`.
+
+Only follower polls are held: requests for readings "since" a time, with no end. A browser
+asking for the last N readings, or a report for a fixed range, is answered at once, and so is
+every request while the newest reading is younger than the threshold. Readings further apart
+than two minutes (a five-minute sensor) are never waited for. Set `hold_seconds` to 0 to turn
+holding off.
 
 ## The Home Assistant entity
 
