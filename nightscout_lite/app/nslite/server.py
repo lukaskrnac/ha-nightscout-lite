@@ -11,6 +11,7 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .align import SourceAligner
 from .api import MAX_BODY_BYTES, NightscoutApi
 from .ha import CoreApi, Importer, Publisher, SourceConfig, Watcher, container_env
 from .store import Store
@@ -35,6 +36,7 @@ class Options:
     keep_days: int = 0
     hold_seconds: int = 20
     resync_after_seconds: int = 20
+    source_delay_seconds: int = 0
 
 
 def load_options(path: str) -> Options:
@@ -60,6 +62,7 @@ def load_options(path: str) -> Options:
         resync_after_seconds=max(
             0, min(int(raw["resync_after_seconds"]) if raw.get("resync_after_seconds") is not None else 20, 55)
         ),
+        source_delay_seconds=max(0, min(int(raw.get("source_delay_seconds") or 0), 59)),
     )
     validate(options)
     return options
@@ -204,6 +207,11 @@ class App:
             else None
         )
         self.watcher = Watcher(core, self.importer) if self.importer is not None else None
+        if self.importer is not None:
+            # Always measures the lag (log and entity attribute); nudges only when D is set.
+            self.importer.aligner = SourceAligner(
+                core.call_service, options.source_entity_id, options.source_delay_seconds
+            )
         self.api = NightscoutApi(
             store,
             read_secret=options.api_secret,

@@ -35,6 +35,9 @@ configuration:
   resync_after_seconds:
     name: Resync after seconds
     description: A follower poll waits for the next reading when the newest one is older than this. Lower keeps followers closer to the readings but resyncs more often.
+  source_delay_seconds:
+    name: Source delay seconds
+    description: How long after measurement a reading is available to the source integration (e.g. 30 for LibreView). The add-on keeps the integration polling that long after each measurement. 0 turns it off. Raise it if readings start coming a minute late.
 network:
   1337/tcp: Nightscout API, read-only (safe to publish)
   1338/tcp: Nightscout API, read and write (keep private)

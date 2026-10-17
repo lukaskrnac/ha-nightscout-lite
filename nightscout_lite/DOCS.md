@@ -48,6 +48,26 @@ minutes, which fills anything missed while the add-on or the websocket was down.
 websocket cannot be kept up, that history read runs every minute instead. On first start it
 imports `import_days` of history, half a day per request.
 
+## Keeping the source integration in step
+
+A polling integration such as LibreView asks its cloud once a minute, on whatever second it
+happened to start. If that is 50 s after a reading reaches the cloud, every reading waits 50 s,
+and keeps waiting, because both run on an exact minute.
+
+Set `source_delay_seconds` (D) to how long after measurement a reading is in the cloud, for
+LibreView typically within half a minute. When three readings in a row reach Home Assistant
+more than D + 10 s after they were measured, the add-on asks the source sensor to refresh
+(`homeassistant.update_entity`) at "next measurement + D". Home Assistant counts the
+integration's next minute from any refresh, so its polls then stay there. This moves the poll;
+it does not add any.
+
+If D is too short the poll comes before the reading is there, and readings arrive a minute
+late instead. After two nudges that did not help, the add-on stops for an hour and writes a
+warning to the log: raise D a little. To choose D, look at `source_lag_seconds` on
+`sensor.nightscout_glucose` or at the lag summary in the log every 30 readings.
+
+The nudge is the add-on's only call to a Home Assistant service, and it is only made with D set.
+
 ## Followers in step with the readings
 
 A follower asks every minute, but nothing ties its minute to when readings arrive, so a reading

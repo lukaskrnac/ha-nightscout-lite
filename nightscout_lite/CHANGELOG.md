@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- `source_delay_seconds` (D, off by default): keeps the source integration polling D seconds
+  after each measurement. When three readings in a row reach Home Assistant more than D + 10 s
+  after they were measured, the add-on calls `homeassistant.update_entity` on the source sensor
+  at "next measurement + D"; Home Assistant then runs the integration's one-minute rhythm from
+  there. At most one nudge per 5 minutes; after two nudges that did not help (D too short, so
+  the poll comes before the reading is there) it pauses for an hour and says so in the log.
+- The lag of each pushed reading (when Home Assistant had it, minus when it was measured) is on
+  `sensor.nightscout_glucose` as `source_lag_seconds`, and summarised in the log every 30
+  readings, to choose D from.
+
 ## 0.3.2
 
 - Holding follower polls no longer tries to recognise the client. The rule is time alone, and

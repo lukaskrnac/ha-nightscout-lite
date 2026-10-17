@@ -1,5 +1,5 @@
 name: Nightscout Lite
-version: "0.3.2"
+version: "0.4.0"
 slug: nightscout_lite
 description: Minimal Nightscout-compatible server inside Home Assistant
 url: https://github.com/lukaskrnac/ha-nightscout-lite
@@ -31,6 +31,7 @@ options:
   keep_days: 0
   hold_seconds: 20
   resync_after_seconds: 20
+  source_delay_seconds: 0
 schema:
   api_secret: password
   write_secret: password?
@@ -44,3 +45,4 @@ schema:
   keep_days: int(0,3650)
   hold_seconds: int(0,25)
   resync_after_seconds: int(0,55)
+  source_delay_seconds: int(0,59)

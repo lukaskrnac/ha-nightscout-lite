@@ -440,6 +440,121 @@ class HoldTests(unittest.TestCase):
         self.assertLess(sum(1 for lag in settled if lag > 1 / 3 + 0.1), len(settled) // 4, lags)
 
 
+# --------------------------------------------------------------------------- source alignment
+
+
+from nslite.align import SourceAligner  # noqa: E402
+
+
+class AlignerTests(unittest.TestCase):
+    D = 30
+
+    def make(self, delay=None):
+        self.now = [1_792_138_800.0]  # seconds
+        self.calls = []
+        self.scheduled = []
+        aligner = SourceAligner(
+            lambda domain, service, data: self.calls.append((domain, service, data)),
+            "sensor.tomas_krnac_glucose_level",
+            self.D if delay is None else delay,
+            clock=lambda: self.now[0],
+            schedule=lambda delay, action: self.scheduled.append((delay, action)),
+        )
+        return aligner
+
+    def reading(self, aligner, minute, lag):
+        measured = 1_792_138_800_000 + minute * 60_000
+        self.now[0] = measured / 1000 + lag
+        return aligner.observe(measured, measured + int(lag * 1000))
+
+    def run_scheduled(self):
+        delay, action = self.scheduled.pop(0)
+        self.now[0] += delay
+        action()
+        return delay
+
+    def test_in_step_readings_are_left_alone(self):
+        aligner = self.make()
+        for minute in range(10):
+            self.reading(aligner, minute, 35)  # within D + 10 s
+        self.assertEqual((self.scheduled, self.calls), ([], []))
+
+    def test_three_late_readings_move_the_poll_to_measurement_plus_d(self):
+        aligner = self.make()
+        self.reading(aligner, 0, 55)
+        self.reading(aligner, 1, 55)
+        self.assertEqual(self.scheduled, [])
+        self.reading(aligner, 2, 55)
+        self.assertEqual(len(self.scheduled), 1)
+        delay = self.run_scheduled()
+        # Reading 2 arrived 55 s after it was measured; the nudge is at minute 3 + 30 s.
+        self.assertAlmostEqual(self.now[0], 1_792_138_800 + 3 * 60 + self.D)
+        self.assertAlmostEqual(delay, 60 + self.D - 55)
+        self.assertEqual(self.calls, [("homeassistant", "update_entity",
+                                       {"entity_id": "sensor.tomas_krnac_glucose_level"})])
+        # Next readings come D after measurement: in step, no more nudges.
+        for minute in range(3, 10):
+            self.reading(aligner, minute, self.D + 1)
+        self.assertEqual(self.scheduled, [])
+        self.assertAlmostEqual(aligner.median_lag(), self.D + 1)
+
+    def test_too_short_d_pauses_after_two_failed_nudges(self):
+        aligner = self.make(delay=5)
+        minute = 0
+        def late_run(lag):
+            nonlocal minute
+            for _ in range(3):
+                self.reading(aligner, minute, lag)
+                minute += 1
+        late_run(40)
+        self.run_scheduled()  # nudge 1: too early, the reading is not there yet
+        # Readings now arrive a minute late; spacing keeps the second nudge 5 minutes away.
+        late_run(65)
+        self.assertEqual(self.scheduled, [])
+        minute += 3
+        late_run(65)
+        self.run_scheduled()  # nudge 2
+        minute += 5
+        with self.assertLogs("nightscout_lite.align", level="WARNING") as logs:
+            late_run(65)
+        self.assertIn("too short", logs.output[0])
+        self.assertEqual(self.scheduled, [])
+        self.assertEqual(len(self.calls), 2)
+        # Paused for an hour, even though readings stay late.
+        minute += 20
+        late_run(65)
+        self.assertEqual(self.scheduled, [])
+
+    def test_disabled_only_measures(self):
+        aligner = self.make(delay=0)
+        for minute in range(10):
+            self.reading(aligner, minute, 50)
+        self.assertEqual((self.scheduled, self.calls), ([], []))
+        self.assertEqual(aligner.median_lag(), 50)
+
+    def test_pushed_reading_carries_its_lag_to_store_and_entity(self):
+        store = temp_store(clock=lambda: int(time.time() * 1000))
+        importer = Importer(FakeCore(), store, SourceConfig("sensor.tomas_krnac_glucose_level"), 10)
+        observed = []
+
+        class Recorder:
+            def observe(self, measured, arrived):
+                observed.append((measured, arrived))
+
+        importer.aligner = Recorder()
+        now = int(time.time() * 1000) // 1000 * 1000
+        state = ha_state(6.8, util.iso_utc(now), unit="mmol/L", value_mg_dl=122, trend="stable",
+                         measurement_timestamp=util.iso_utc(now - 42_000))
+        state["entity_id"] = "sensor.tomas_krnac_glucose_level"
+        self.assertEqual(importer.ingest_state(state), 1)
+        self.assertEqual(importer.ingest_state(state), 0)  # the same reading again: observed once
+        self.assertEqual(observed, [(now - 42_000, now)])
+        entry = store.latest_entry()
+        self.assertEqual(entry["sourceLag"], 42.0)
+        _, attributes = entity_payload(entry, "mmol", None)
+        self.assertEqual(attributes["source_lag_seconds"], 42.0)
+
+
 # --------------------------------------------------------------------------- websocket push
 
 

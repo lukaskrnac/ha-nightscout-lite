@@ -127,6 +127,9 @@ class CoreApi:
     def set_state(self, entity_id: str, state: str, attributes: dict) -> None:
         self._request("POST", f"/states/{entity_id}", {"state": state, "attributes": attributes})
 
+    def call_service(self, domain: str, service: str, data: dict) -> None:
+        self._request("POST", f"/services/{domain}/{service}", data)
+
 
 # --------------------------------------------------------------------------- in
 
@@ -225,17 +228,30 @@ class Importer:
         self.wake = threading.Event()
         # Once a minute on its own; the watcher stretches this while push updates arrive.
         self.poll_seconds = 60
+        # Set by the app: told about every pushed reading, to keep the source polling in step.
+        self.aligner = None
 
     def ingest_state(self, state: dict) -> int:
         """One state pushed by Home Assistant, stored at once without a history read."""
         if state.get("entity_id") != self.config.entity_id:
             return 0
+        arrived = parse_time_ms(state.get("last_updated")) or parse_time_ms(state.get("last_changed"))
         inserted = 0
         for doc in states_to_entries([state], self.config):
+            if arrived is not None:
+                # How long after measurement Home Assistant had it: what source_delay_seconds tunes.
+                doc["sourceLag"] = round((arrived - doc["date"]) / 1000.0, 1)
             try:
-                inserted += self.store.insert_entries([doc], SOURCE_HA).inserted
+                added = self.store.insert_entries([doc], SOURCE_HA).inserted
             except ValidationError as error:
                 LOG.debug("Skipped a pushed reading: %s", error)
+                continue
+            inserted += added
+            if added and arrived is not None and self.aligner is not None:
+                try:
+                    self.aligner.observe(doc["date"], arrived)
+                except Exception as error:  # noqa: BLE001 - alignment must never cost a reading
+                    LOG.warning("Source alignment failed: %s", error)
         if inserted:
             self.on_new()
         return inserted
@@ -403,6 +419,7 @@ def entity_payload(entry: dict, display_units: str, previous: dict | None) -> tu
         "trend_arrow": DIRECTION_ARROWS.get(direction),
         "delta": (round(delta / MGDL_PER_MMOL, 2) if mmol else delta) if delta is not None else None,
         "device": entry.get("device"),
+        "source_lag_seconds": entry.get("sourceLag"),
     }
     return value, attributes
 
